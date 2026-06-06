@@ -143,41 +143,48 @@ class NativeSearchEngine:
         if not query_vec:
             return []
 
-        # --- candidate retrieval via inverted index ----------------------
-        placeholders = ",".join("?" * len(query_grams))
-        rows = self._conn.execute(
-            f"SELECT DISTINCT doc_id FROM ngram_docs WHERE ngram IN ({placeholders})",
-            list(query_grams),
-        ).fetchall()
-        candidate_ids = [r["doc_id"] for r in rows]
+        # --- candidate retrieval: single JOIN avoids large IN (doc_ids) -
+        # Passing only query_grams (≤ ~50 values for typical terms) stays
+        # well within SQLite's variable limit.  We rank candidates by n-gram
+        # hit count and cap at 500 before scoring, which also limits the
+        # amount of cosine computation on very common n-grams.
+        grams_ph = ",".join("?" * len(query_grams))
+        params: List[Any] = list(query_grams)
 
-        if not candidate_ids:
-            return []
-
-        # --- fetch candidate docs + apply filters -----------------------
-        id_placeholders = ",".join("?" * len(candidate_ids))
-        sql = f"SELECT * FROM docs WHERE doc_id IN ({id_placeholders})"
-        params: List[Any] = list(candidate_ids)
-
+        where_clauses = [f"nd.ngram IN ({grams_ph})"]
         if not include_source_concepts:
-            sql += " AND term_type = ?"
-            params.append(self.CONCEPT_TERM)
+            where_clauses.append("d.term_type = 'C'")
         if standard_only:
-            sql += " AND standard_concept = 'S'"
+            where_clauses.append("d.standard_concept = 'S'")
         if domain_filter:
             dp = ",".join("?" * len(domain_filter))
-            sql += f" AND domain_id IN ({dp})"
+            where_clauses.append(f"d.domain_id IN ({dp})")
             params.extend(domain_filter)
         if vocabulary_filter:
             vp = ",".join("?" * len(vocabulary_filter))
-            sql += f" AND vocabulary_id IN ({vp})"
+            where_clauses.append(f"d.vocabulary_id IN ({vp})")
             params.extend(vocabulary_filter)
         if concept_class_filter:
             cp = ",".join("?" * len(concept_class_filter))
-            sql += f" AND concept_class_id IN ({cp})"
+            where_clauses.append(f"d.concept_class_id IN ({cp})")
             params.extend(concept_class_filter)
 
+        where_sql = " AND ".join(where_clauses)
+        sql = f"""
+            SELECT d.doc_id, d.concept_id, d.term, d.domain_id, d.vocabulary_id,
+                   d.concept_class_id, d.standard_concept, d.term_type,
+                   COUNT(*) AS ngram_hits
+            FROM ngram_docs nd
+            JOIN docs d ON d.doc_id = nd.doc_id
+            WHERE {where_sql}
+            GROUP BY d.doc_id
+            ORDER BY ngram_hits DESC
+            LIMIT 500
+        """
         docs = self._conn.execute(sql, params).fetchall()
+
+        if not docs:
+            return []
 
         # --- score, deduplicate, sort ------------------------------------
         scored: List[Dict[str, Any]] = []
