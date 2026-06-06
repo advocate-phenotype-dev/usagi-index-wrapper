@@ -61,10 +61,8 @@ CREATE TABLE IF NOT EXISTS docs (
 );
 CREATE TABLE IF NOT EXISTS ngram_docs (
     ngram  TEXT    NOT NULL,
-    doc_id INTEGER NOT NULL,
-    PRIMARY KEY (ngram, doc_id)
+    doc_id INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_ngram_docs_ngram ON ngram_docs(ngram);
 CREATE TABLE IF NOT EXISTS ngram_df (
     ngram    TEXT PRIMARY KEY,
     doc_freq INTEGER NOT NULL
@@ -73,6 +71,11 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+"""
+
+# Applied by NativeSearchEngine.open() after the index is fully built.
+_READ_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_ngram_docs_ngram ON ngram_docs(ngram);
 """
 
 
@@ -96,9 +99,10 @@ class NativeSearchEngine:
     def open(self) -> None:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # WAL mode for concurrent reads while FastAPI is running
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA query_only=ON")
+        # Ensure the search index exists (idempotent on already-built DBs).
+        self._conn.executescript(_READ_INDEXES)
         try:
             self.num_docs = int(
                 self._conn.execute(
@@ -254,8 +258,12 @@ class NativeIndexBuilder:
     def open(self) -> None:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.executescript(_SCHEMA)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Bulk-load pragmas: no fsync, memory journal, large cache.
+        # Safe to use here because the builder always runs to completion
+        # before the DB is read by the service.
+        self._conn.execute("PRAGMA synchronous=OFF")
+        self._conn.execute("PRAGMA journal_mode=MEMORY")
+        self._conn.execute("PRAGMA cache_size=-524288")  # 512 MB
 
     def close(self) -> None:
         if self._conn:
@@ -282,8 +290,10 @@ class NativeIndexBuilder:
         )
         doc_id = cur.lastrowid
         grams = ngrams(term)
+        # Plain INSERT — no duplicates possible because ngrams() returns a Set,
+        # so each (ngram, doc_id) pair is unique within a single add_term call.
         self._conn.executemany(
-            "INSERT OR IGNORE INTO ngram_docs (ngram, doc_id) VALUES (?,?)",
+            "INSERT INTO ngram_docs (ngram, doc_id) VALUES (?,?)",
             [(g, doc_id) for g in grams],
         )
         return doc_id
@@ -292,7 +302,13 @@ class NativeIndexBuilder:
         self._conn.commit()
 
     def _finalise(self) -> None:
-        """Compute ngram_df and num_docs, then commit."""
+        """Build the ngram search index, compute ngram_df and num_docs."""
+        logger.info("Building ngram_docs index…")
+        # Create the index now, after all rows are inserted, so SQLite builds
+        # the B-tree in one pass rather than maintaining it on every insert.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ngram_docs_ngram ON ngram_docs(ngram)"
+        )
         logger.info("Computing n-gram document frequencies…")
         self._conn.execute("DELETE FROM ngram_df")
         self._conn.execute(

@@ -108,8 +108,14 @@ def main():
                 std = c["standard_concept"]
                 if std not in ("S", "C"):
                     continue
-                syn = row.get("concept_synonym_name", "").strip()
-                if syn and syn.lower() != c["name"].lower():
+                raw = row.get("concept_synonym_name", "").strip()
+                # LOINC stores multiple synonyms as one semicolon-separated
+                # string per row.  Split so each token is indexed separately,
+                # preventing unrelated n-gram overlap across the full string.
+                parts = [p.strip() for p in raw.split(";") if p.strip()] if raw else []
+                for syn in parts:
+                    if syn.lower() == c["name"].lower():
+                        continue
                     builder.add_term(
                         syn, cid,
                         c["domain_id"], c["vocabulary_id"],
