@@ -147,13 +147,24 @@ class NativeSearchEngine:
         if not query_vec:
             return []
 
+        # --- drop high-frequency n-grams from the JOIN ------------------
+        # Bigrams like "ca", "er", "an" appear in hundreds of thousands of
+        # rows on a real vocabulary.  Including them explodes the intermediate
+        # result set without adding precision (their IDF is near zero anyway).
+        # We keep only n-grams present in ≤ MAX_DF_PCT percent of documents.
+        MAX_DF_PCT = 0.10  # drop n-grams appearing in >10% of docs
+        max_df = max(1, int(self.num_docs * MAX_DF_PCT))
+        selective_grams = {g for g in query_grams if g in query_vec
+                           and math.exp(-query_vec[g]) * self.num_docs <= max_df}
+        if not selective_grams:
+            # All n-grams are very common (e.g. single-word query like "of").
+            # Fall back to the least-common half.
+            sorted_grams = sorted(query_vec, key=lambda g: query_vec[g], reverse=True)
+            selective_grams = set(sorted_grams[: max(1, len(sorted_grams) // 2)])
+
         # --- candidate retrieval: single JOIN avoids large IN (doc_ids) -
-        # Passing only query_grams (≤ ~50 values for typical terms) stays
-        # well within SQLite's variable limit.  We rank candidates by n-gram
-        # hit count and cap at 500 before scoring, which also limits the
-        # amount of cosine computation on very common n-grams.
-        grams_ph = ",".join("?" * len(query_grams))
-        params: List[Any] = list(query_grams)
+        grams_ph = ",".join("?" * len(selective_grams))
+        params: List[Any] = list(selective_grams)
 
         where_clauses = [f"nd.ngram IN ({grams_ph})"]
         if not include_source_concepts:
