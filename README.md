@@ -202,3 +202,11 @@ python scripts/upgrade_lucene_index.py --index-dir /data/usagi/derivedIndex  # i
 | **Berkeley DB** | Python's `bsddb3` wraps C libdb and cannot read Berkeley DB JE (Java Edition) files. We substitute Athena `CONCEPT.csv` as the concept-metadata source. The data is identical — Usagi's `BerkeleyDbBuilder.java` populates its BDB from the same CSV. | None |
 | **`filterConceptIds`** | Usagi's GUI passes a set of pre-selected concept IDs when the user is refining a mapping. This is not exposed by the REST API (add to `SearchRequest` if needed). | Feature gap, not a correctness issue |
 | **Score normalisation** | Scores are TF-IDF cosine in [0, 1]. Lucene native BM25 scores (used as fallback when the query contains BoostQuery clauses) are not normalised. The fallback path is uncommon. | Rare edge case |
+
+## Setup on Debian/Ubuntu VMs
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install fastapi "uvicorn[standard]" pydantic pydantic-settings
+```
