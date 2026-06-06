@@ -1,7 +1,7 @@
 # usagi-search
 
 Headless REST service that exposes the Usagi concept-matching search as a JSON API.  
-No GUI, no Excel dependency.  Reads the existing Usagi Lucene index and Athena
+Reads the existing Usagi Lucene index and Athena
 `CONCEPT.csv` directly.
 
 ---
