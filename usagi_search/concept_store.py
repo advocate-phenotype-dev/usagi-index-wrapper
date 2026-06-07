@@ -185,6 +185,36 @@ class ConceptStore:
         except Exception:
             return []
 
+    def get_breadcrumb(self, concept_id: int, concept_name: str) -> str:
+        """
+        Walk up the hierarchy from concept_id to the root and return a
+        ' > '-separated path string, e.g.:
+            'Procedure on bone marrow > Bone marrow sampling'
+        (The concept itself is not included — the caller prepends it.)
+        Always picks the first parent at each level; OMOP is a DAG so paths
+        are not unique, but one representative path is enough for display.
+        """
+        if self._conn is None:
+            return concept_name
+        path = [concept_name]
+        current_id = concept_id
+        for _ in range(8):
+            row = self._conn.execute(
+                """SELECT c.concept_id, c.concept_name
+                   FROM concept_hierarchy h
+                   JOIN concepts c ON c.concept_id = h.parent_concept_id
+                   WHERE h.concept_id = ?
+                   ORDER BY c.concept_id
+                   LIMIT 1""",
+                (current_id,),
+            ).fetchone()
+            if row is None:
+                break
+            path.append(row["concept_name"])
+            current_id = row["concept_id"]
+        path.reverse()
+        return " > ".join(path)
+
     def get_hierarchy_counts(self, concept_id: int) -> tuple:
         """Return (parent_count, child_count) for a concept."""
         if self._conn is None:

@@ -152,8 +152,9 @@ def search(req: SearchRequest):
         if hierarchy_available:
             parent_count, child_count = _store.get_hierarchy_counts(h["concept_id"])
             parents = _store.get_parents(h["concept_id"])
+            breadcrumb = _store.get_breadcrumb(h["concept_id"], concept_name)
         else:
-            parent_count, child_count, parents = 0, 0, []
+            parent_count, child_count, parents, breadcrumb = 0, 0, [], concept_name
         results.append(
             ConceptResult(
                 concept_id=h["concept_id"],
@@ -167,6 +168,7 @@ def search(req: SearchRequest):
                 parent_count=parent_count,
                 child_count=child_count,
                 parents=parents,
+                breadcrumb=breadcrumb,
             )
         )
 

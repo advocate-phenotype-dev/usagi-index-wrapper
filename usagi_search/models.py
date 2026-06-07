@@ -54,6 +54,10 @@ class ConceptResult(BaseModel):
         default_factory=list,
         description="Immediate parent concepts (up to 10)",
     )
+    breadcrumb: str = Field(
+        "",
+        description="Ancestor path from root to this concept, ' > '-separated",
+    )
 
 
 class SearchResponse(BaseModel):
