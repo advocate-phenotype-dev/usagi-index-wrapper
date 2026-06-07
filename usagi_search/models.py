@@ -34,6 +34,11 @@ class SearchRequest(BaseModel):
     )
 
 
+class ParentConcept(BaseModel):
+    concept_id: int
+    concept_name: str
+
+
 class ConceptResult(BaseModel):
     concept_id: int
     concept_name: str = Field(..., description="Canonical concept name from vocabulary")
@@ -43,6 +48,12 @@ class ConceptResult(BaseModel):
     standard_concept: str = Field(..., description="'S'=standard, 'C'=classification, ''=non-standard")
     match_term: str = Field(..., description="Indexed term that drove the match (may be a synonym)")
     similarity_score: float = Field(..., description="TF-IDF cosine similarity [0, 1]")
+    parent_count: int = Field(0, description="Number of immediate parent concepts")
+    child_count: int = Field(0, description="Number of immediate child concepts")
+    parents: List[ParentConcept] = Field(
+        default_factory=list,
+        description="Immediate parent concepts (up to 10)",
+    )
 
 
 class SearchResponse(BaseModel):

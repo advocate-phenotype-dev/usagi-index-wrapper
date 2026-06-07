@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS concepts (
 );
 CREATE INDEX IF NOT EXISTS idx_concepts_vocab ON concepts(vocabulary_id);
 CREATE INDEX IF NOT EXISTS idx_concepts_domain ON concepts(domain_id);
+
+-- Immediate parent-child relationships (min_levels_of_separation=1 from CONCEPT_ANCESTOR.csv).
+-- Mirrors Usagi's ParentChildRelationShip BDB store.
+CREATE TABLE IF NOT EXISTS concept_hierarchy (
+    concept_id        INTEGER NOT NULL,
+    parent_concept_id INTEGER NOT NULL,
+    PRIMARY KEY (concept_id, parent_concept_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON concept_hierarchy(parent_concept_id);
 """
 
 
@@ -141,3 +150,106 @@ class ConceptStore:
             return dict(row) if row else None
         except Exception:
             return None
+
+    # ------------------------------------------------------------------
+    # Hierarchy
+    # ------------------------------------------------------------------
+
+    def has_hierarchy(self) -> bool:
+        if self._conn is None:
+            return False
+        try:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM concept_hierarchy"
+            ).fetchone()[0] > 0
+        except Exception:
+            return False
+
+    def get_parents(self, concept_id: int) -> list:
+        """Return immediate parent concepts (up to 10)."""
+        if self._conn is None:
+            return []
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT c.concept_id, c.concept_name
+                FROM concept_hierarchy h
+                JOIN concepts c ON c.concept_id = h.parent_concept_id
+                WHERE h.concept_id = ?
+                LIMIT 10
+                """,
+                (concept_id,),
+            ).fetchall()
+            return [{"concept_id": r["concept_id"], "concept_name": r["concept_name"]}
+                    for r in rows]
+        except Exception:
+            return []
+
+    def get_hierarchy_counts(self, concept_id: int) -> tuple:
+        """Return (parent_count, child_count) for a concept."""
+        if self._conn is None:
+            return 0, 0
+        try:
+            pc = self._conn.execute(
+                "SELECT COUNT(*) FROM concept_hierarchy WHERE concept_id = ?",
+                (concept_id,),
+            ).fetchone()[0]
+            cc = self._conn.execute(
+                "SELECT COUNT(*) FROM concept_hierarchy WHERE parent_concept_id = ?",
+                (concept_id,),
+            ).fetchone()[0]
+            return pc, cc
+        except Exception:
+            return 0, 0
+
+    def build_hierarchy(self, ancestor_csv: str, valid_concept_ids: set) -> int:
+        """
+        Populate concept_hierarchy from CONCEPT_ANCESTOR.csv.
+        Only stores rows with min_levels_of_separation=1 (immediate parent-child),
+        mirroring BerkeleyDbBuilder.loadAncestors().
+        """
+        if not Path(ancestor_csv).exists():
+            raise FileNotFoundError(f"CONCEPT_ANCESTOR.csv not found: {ancestor_csv}")
+
+        self._conn.executescript(
+            "CREATE TABLE IF NOT EXISTS concept_hierarchy ("
+            "  concept_id INTEGER NOT NULL,"
+            "  parent_concept_id INTEGER NOT NULL,"
+            "  PRIMARY KEY (concept_id, parent_concept_id)"
+            ");"
+            "CREATE INDEX IF NOT EXISTS idx_hierarchy_parent "
+            "  ON concept_hierarchy(parent_concept_id);"
+        )
+
+        count = 0
+        batch = []
+        with open(ancestor_csv, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                if row.get("min_levels_of_separation", "") != "1":
+                    continue
+                anc = int(row["ancestor_concept_id"])
+                desc = int(row["descendant_concept_id"])
+                if anc == desc:
+                    continue
+                if anc not in valid_concept_ids or desc not in valid_concept_ids:
+                    continue
+                batch.append((desc, anc))  # child → parent
+                if len(batch) >= 10_000:
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO concept_hierarchy VALUES (?,?)", batch
+                    )
+                    self._conn.commit()
+                    count += len(batch)
+                    batch = []
+                    if count % 100_000 == 0:
+                        logger.info("  %d hierarchy rows loaded…", count)
+        if batch:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO concept_hierarchy VALUES (?,?)", batch
+            )
+            self._conn.commit()
+            count += len(batch)
+
+        logger.info("Hierarchy built: %d parent-child relationships.", count)
+        return count

@@ -146,8 +146,14 @@ def search(req: SearchRequest):
     )
 
     results: List[ConceptResult] = []
+    hierarchy_available = _store.has_hierarchy()
     for h in hits:
         concept_name = _store.get_concept_name(h["concept_id"]) or h["match_term"]
+        if hierarchy_available:
+            parent_count, child_count = _store.get_hierarchy_counts(h["concept_id"])
+            parents = _store.get_parents(h["concept_id"])
+        else:
+            parent_count, child_count, parents = 0, 0, []
         results.append(
             ConceptResult(
                 concept_id=h["concept_id"],
@@ -158,6 +164,9 @@ def search(req: SearchRequest):
                 standard_concept=h["standard_concept"],
                 match_term=h["match_term"],
                 similarity_score=h["similarity_score"],
+                parent_count=parent_count,
+                child_count=child_count,
+                parents=parents,
             )
         )
 

@@ -65,9 +65,11 @@ def load_concepts(concept_csv: str) -> tuple[dict, dict]:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--concept-csv",  required=True)
-    p.add_argument("--synonym-csv",  default=None)
-    p.add_argument("--db-path",      required=True)
+    p.add_argument("--concept-csv",   required=True)
+    p.add_argument("--synonym-csv",   default=None)
+    p.add_argument("--ancestor-csv",  default=None,
+                   help="Path to CONCEPT_ANCESTOR.csv for parent-child hierarchy")
+    p.add_argument("--db-path",       required=True)
     args = p.parse_args()
 
     t0 = time.time()
@@ -156,6 +158,19 @@ def main():
     conn.executemany("INSERT OR REPLACE INTO concepts VALUES (?,?,?,?,?,?,?,?,?,?)", batch)
     conn.commit()
     conn.close()
+
+    # 4 ── Hierarchy (optional)
+    if args.ancestor_csv:
+        from usagi_search.concept_store import ConceptStore
+        log.info("Loading parent-child hierarchy from %s…", args.ancestor_csv)
+        store = ConceptStore(args.db_path)
+        store.open()
+        valid_ids = set(concepts.keys())
+        n = store.build_hierarchy(args.ancestor_csv, valid_ids)
+        store.close()
+        log.info("  %d relationships written.", n)
+    else:
+        log.info("Skipping hierarchy (no --ancestor-csv provided).")
 
     elapsed = time.time() - t0
     log.info("Done in %.1f s.  Index at: %s", elapsed, args.db_path)
