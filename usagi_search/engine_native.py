@@ -138,7 +138,13 @@ class NativeSearchEngine:
         if not self._conn:
             return []
 
-        query_grams = ngrams(search_term)
+        # Use trigrams only for candidate retrieval — bigrams are too common
+        # on small-RAM hosts (each bigram posting list can be millions of rows).
+        # The index contains both bigrams and trigrams, so trigram-only queries
+        # still hit the same index; they just prune the candidate set far more
+        # aggressively.  Full bigram+trigram IDF vectors are still used for
+        # scoring after candidates are retrieved.
+        query_grams = ngrams(search_term, min_n=3, max_n=3)
         if not query_grams:
             return []
 
@@ -147,24 +153,9 @@ class NativeSearchEngine:
         if not query_vec:
             return []
 
-        # --- drop high-frequency n-grams from the JOIN ------------------
-        # Bigrams like "ca", "er", "an" appear in hundreds of thousands of
-        # rows on a real vocabulary.  Including them explodes the intermediate
-        # result set without adding precision (their IDF is near zero anyway).
-        # We keep only n-grams present in ≤ MAX_DF_PCT percent of documents.
-        MAX_DF_PCT = 0.10  # drop n-grams appearing in >10% of docs
-        max_df = max(1, int(self.num_docs * MAX_DF_PCT))
-        selective_grams = {g for g in query_grams if g in query_vec
-                           and math.exp(-query_vec[g]) * self.num_docs <= max_df}
-        if not selective_grams:
-            # All n-grams are very common (e.g. single-word query like "of").
-            # Fall back to the least-common half.
-            sorted_grams = sorted(query_vec, key=lambda g: query_vec[g], reverse=True)
-            selective_grams = set(sorted_grams[: max(1, len(sorted_grams) // 2)])
-
         # --- candidate retrieval: single JOIN avoids large IN (doc_ids) -
-        grams_ph = ",".join("?" * len(selective_grams))
-        params: List[Any] = list(selective_grams)
+        grams_ph = ",".join("?" * len(query_grams))
+        params: List[Any] = list(query_grams)
 
         where_clauses = [f"nd.ngram IN ({grams_ph})"]
         if not include_source_concepts:
