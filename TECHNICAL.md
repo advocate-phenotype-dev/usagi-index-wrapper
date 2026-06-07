@@ -352,6 +352,75 @@ CREATE INDEX idx_hierarchy_parent ON concept_hierarchy(parent_concept_id);
 
 ---
 
+## R Client
+
+A lightweight R package is available at
+[advocate-phenotype-dev/usagi-r-client](https://github.com/advocate-phenotype-dev/usagi-r-client).
+
+### Installation
+
+```r
+# install.packages("pak")
+pak::pkg_install("advocate-phenotype-dev/usagi-r-client")
+```
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `usagi_connect(base_url, timeout)` | Create a connection object pointing at the service |
+| `usagi_health(client)` | Check service status; returns a named list |
+| `usagi_search(client, term, ...)` | Search a single term; returns a `data.frame` |
+| `usagi_search_batch(client, terms, ...)` | Search multiple terms; returns a combined `data.frame` with a `source_term` column |
+
+### Example
+
+```r
+library(usagir)
+
+client <- usagi_connect("http://localhost:8000")
+
+# Single term with domain filter
+df <- usagi_search(client, "Whipple Procedure", standard_only = TRUE, top_n = 5)
+df[, c("concept_id", "concept_name", "similarity_score", "breadcrumb")]
+#>   concept_id                concept_name similarity_score
+#> 1    4020329     Pancreaticoduodenectomy         1.000000
+#> 2   37166875  Robotic assisted pancrea…         0.690007
+#>                                                    breadcrumb
+#> 1  Procedure on abdomen > … > Pancreaticoduodenectomy
+#> 2  … > Pancreaticoduodenectomy > … > Robotic assisted …
+
+# Batch search — one row per term per result
+batch <- usagi_search_batch(
+  client,
+  terms         = c("HbA1c", "hypertension", "metformin"),
+  standard_only = TRUE,
+  top_n         = 2
+)
+```
+
+### Return value
+
+`usagi_search()` returns a data frame with columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `concept_id` | integer | OMOP standard concept ID |
+| `concept_name` | character | Canonical concept name |
+| `vocabulary_id` | character | e.g. `"SNOMED"`, `"RxNorm"`, `"LOINC"` |
+| `domain_id` | character | e.g. `"Condition"`, `"Drug"`, `"Measurement"` |
+| `concept_class_id` | character | e.g. `"Disorder"`, `"Ingredient"` |
+| `standard_concept` | character | `"S"` = standard, `"C"` = classification |
+| `match_term` | character | Indexed synonym that drove the match |
+| `similarity_score` | double | TF-IDF cosine similarity [0, 1] |
+| `parent_count` | integer | Number of immediate parent concepts |
+| `child_count` | integer | Number of immediate child concepts |
+| `breadcrumb` | character | Ancestor path from vocabulary root, `" > "`-separated |
+
+`usagi_search_batch()` adds a `source_term` column.
+
+---
+
 ## Deployment
 
 ### Docker / Podman
