@@ -180,18 +180,19 @@ LOINC's `CONCEPT_SYNONYM.csv` rows concatenate multiple synonym keywords into a 
 
 Indexing this as a single document creates spurious n-gram overlap between unrelated search terms (the string contains "breast cancer" and "negative" as separate keywords, causing it to match "triple negative breast cancer"). The build script splits on `;` and indexes each token as a separate document.
 
-### Timing (test environment: 3.3 GB VM, shared storage)
+### Timing
 
-| Phase | Time |
-|---|---|
-| Load CONCEPT.csv | ~5 seconds |
-| Index ~917K concept names | ~9 minutes |
-| Index ~3.9M synonyms | ~2 minutes |
-| CREATE INDEX on ngram_docs | ~5 hours (I/O bound on shared VM storage) |
-| Compute ngram_df | ~6 minutes |
-| **Total** | **~5.5 hours** |
+| Phase | 3.3 GB VM (shared storage) | MacBook Pro (NVMe) |
+|---|---|---|
+| Load CONCEPT.csv | ~5 s | ~3 s |
+| Index ~917K concept names | ~9 min | ~18 s |
+| Index ~3.9M synonyms | ~2 min | ~55 s |
+| BUILD ngram_docs index | ~5 hours | ~2.5 min |
+| Compute ngram_df | ~6 min | ~4 min |
+| Load hierarchy (~1.76M rows) | ~2 min | ~12 s |
+| **Total** | **~5.5 hours** | **~8 min** |
 
-On a server with local NVMe SSD and sufficient RAM to cache the working set, the `CREATE INDEX` step is expected to complete in under 30 minutes. The final DB size is approximately 6 GB.
+The `CREATE INDEX` step dominates on slow storage. The final DB is approximately 6 GB.
 
 ---
 
@@ -242,6 +243,16 @@ CREATE TABLE concepts (
     valid_end_date   TEXT,
     invalid_reason   TEXT
 );
+
+-- Immediate parent-child relationships (min_levels_of_separation=1 from CONCEPT_ANCESTOR.csv).
+-- Mirrors Usagi's ParentChildRelationShip BDB store.
+-- concept_id is the child; parent_concept_id is the immediate parent.
+CREATE TABLE concept_hierarchy (
+    concept_id        INTEGER NOT NULL,
+    parent_concept_id INTEGER NOT NULL,
+    PRIMARY KEY (concept_id, parent_concept_id)
+);
+CREATE INDEX idx_hierarchy_parent ON concept_hierarchy(parent_concept_id);
 ```
 
 ---
@@ -257,6 +268,7 @@ CREATE TABLE concepts (
 7. Filter scores ≤ 0, deduplicate by `concept_id` (keep highest score), sort descending
 8. Enrich with `concept_name` from the `concepts` table
 9. Tie-break: within equal scores, prefer rows where `match_term == concept_name`
+10. Enrich with `parent_count`, `child_count`, `parents[]`, and `breadcrumb` from `concept_hierarchy`
 
 ---
 
@@ -306,24 +318,37 @@ CREATE TABLE concepts (
 
 ```json
 {
-  "term": "triple negative breast cancer",
+  "term": "cholecystectomy",
   "total_candidates": 5,
   "results": [
     {
-      "concept_id": 45768522,
-      "concept_name": "Triple-negative breast cancer",
+      "concept_id": 4242997,
+      "concept_name": "Cholecystectomy",
       "vocabulary_id": "SNOMED",
-      "domain_id": "Condition",
-      "concept_class_id": "Disorder",
+      "domain_id": "Procedure",
+      "concept_class_id": "Procedure",
       "standard_concept": "S",
-      "match_term": "Triple-negative breast cancer",
-      "similarity_score": 0.795
+      "match_term": "Cholecystectomy",
+      "similarity_score": 1.0,
+      "parent_count": 2,
+      "child_count": 10,
+      "parents": [
+        {"concept_id": 4001377, "concept_name": "Biliary tract excision"},
+        {"concept_id": 4059308, "concept_name": "Operation on gallbladder"}
+      ],
+      "breadcrumb": "Procedure > Procedure by method > Removal > Surgical removal > Excision > Trunk excision > Abdomen excision > Biliary tract excision > Cholecystectomy"
     }
   ]
 }
 ```
 
-`match_term` is the specific indexed term that drove the match — it may be a synonym rather than the canonical `concept_name`.
+| Field | Description |
+|---|---|
+| `match_term` | The indexed synonym that drove the match — may differ from `concept_name` |
+| `parent_count` | Number of immediate parent concepts in the hierarchy |
+| `child_count` | Number of immediate child concepts |
+| `parents` | Immediate parent concepts (up to 10) with concept_id and concept_name |
+| `breadcrumb` | Ancestor path from vocabulary root to this concept, `' > '`-separated, walking one representative parent chain (OMOP is a DAG) |
 
 ---
 
