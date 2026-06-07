@@ -1,22 +1,28 @@
-
-#
-#       'https://dlcdn.apache.org/lucene/pylucene/pylucene-9.10.0-src.tar.gz'
-#   conda install -c conda-forge pylucene
-#   export JCC_JDK=/path/to/jdk   # or rely on java.home detection
-#   FROM coady/pylucene:latest
-#   pip install --no-binary :all: \
-# ── PyLucene ───────────────────────────────────────────────────────────────
 # ── Runtime ────────────────────────────────────────────────────────────────
-# ── Test helpers ───────────────────────────────────────────────────────────
-# Docker alternative — use the official pylucene image as a base:
-# Or via conda-forge (pre-built wheel, easiest):
-# PyLucene is NOT on PyPI.  It must be compiled against your JDK.
-# Quick-install on macOS / Linux (requires Java 11+, Ant, make):
-# See README.md §  "Installing PyLucene" for full instructions.
 fastapi>=0.111.0
-httpx>=0.27.0
-httpx>=0.27.0      # async test client used by test_service.py
-pydantic-settings>=2.3.0
-pydantic>=2.7.0
-pytest
 uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# ── PyLucene ───────────────────────────────────────────────────────────────
+# PyLucene is NOT on PyPI.  It must be compiled against your JDK.
+#
+# Quick-install on macOS / Linux (requires Java 11+, Ant, make):
+#
+#   export JCC_JDK=/path/to/jdk   # or rely on java.home detection
+#   pip install --no-binary :all: \
+#       'https://dlcdn.apache.org/lucene/pylucene/pylucene-9.10.0-src.tar.gz'
+#
+# Or via conda-forge (pre-built wheel, easiest):
+#
+#   conda install -c conda-forge pylucene
+#
+# Docker alternative — use the official pylucene image as a base:
+#
+#   FROM coady/pylucene:latest
+#
+# See README.md §  "Installing PyLucene" for full instructions.
+
+# ── Test / dev ─────────────────────────────────────────────────────────────
+pytest>=8.0.0
+httpx>=0.27.0
