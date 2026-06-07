@@ -72,20 +72,25 @@ def main():
 
     print(f"  total_candidates: {resp['total_candidates']}")
     print()
-    print(
-        f"  {'rank':<4} {'score':>7}  {'concept_id':>10}  "
-        f"{'vocab':<12} {'domain':<12} {'std':>3}  concept_name"
-    )
-    print("  " + "─" * 90)
     for i, r in enumerate(resp["results"], 1):
+        # Header line
+        match_note = f'  matched: "{r["match_term"]}"' \
+            if r["match_term"].lower() != r["concept_name"].lower() else ""
         print(
-            f"  {i:<4} {r['similarity_score']:>7.4f}  "
-            f"{r['concept_id']:>10}  "
-            f"{r['vocabulary_id']:<12} {r['domain_id']:<12} "
-            f"{r['standard_concept']:>3}  {r['concept_name']}"
+            f"  {r['concept_id']}  {r['concept_name']}  "
+            f"[{r['vocabulary_id']}, {r['domain_id']}]  "
+            f"score={r['similarity_score']:.3f}"
+            f"{match_note}"
         )
-        if r["match_term"].lower() != r["concept_name"].lower():
-            print(f"  {'':4} {'':>7}  {'':>10}  match_term: {r['match_term']}")
+        # Ancestry chain: parse breadcrumb, drop the concept itself, indent
+        breadcrumb = r.get("breadcrumb", "")
+        if breadcrumb:
+            parts = breadcrumb.split(" > ")
+            if parts and parts[-1] == r["concept_name"]:
+                parts = parts[:-1]
+            for depth, ancestor in enumerate(reversed(parts)):
+                print(f"  {'  ' * (depth + 1)}← {ancestor}")
+        print()
 
     # ── Additional examples ───────────────────────────────────────────────
     extra_terms = ["type 2 diabetes", "hypertension", "aspirin 100mg"]
