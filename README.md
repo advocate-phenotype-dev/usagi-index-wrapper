@@ -1,8 +1,8 @@
 # usagi-search
 
-Headless REST service that exposes the Usagi concept-matching search as a JSON API.  
-Reads the existing Usagi Lucene index and Athena
-`CONCEPT.csv` directly.
+Headless REST service for OMOP concept matching. Replicates Usagi's TF-IDF cosine n-gram search without the Java GUI or Excel dependency.
+
+**No Java required.** Builds its own search index from Athena vocabulary files in ~10 minutes on a laptop.
 
 ---
 
@@ -11,45 +11,48 @@ Reads the existing Usagi Lucene index and Athena
 | Requirement | Notes |
 |---|---|
 | Python 3.10+ | |
-| Java 11+ | `java -version` must work on PATH |
-| PyLucene 9.x | See §"Installing PyLucene" below |
-| Usagi index on disk | The `mainIndex/` (and optionally `derivedIndex/`) folder that Usagi builds |
-| Athena `CONCEPT.csv` | From [athena.ohdsi.org](https://athena.ohdsi.org) — same download used when building the Usagi index |
+| Athena vocabulary files | `CONCEPT.csv`, `CONCEPT_SYNONYM.csv`, `CONCEPT_ANCESTOR.csv` from [athena.ohdsi.org](https://athena.ohdsi.org) |
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Install Python dependencies
-pip install -r requirements.txt
+# 1. Clone and create virtual environment
+git clone https://github.com/advocate-phenotype-dev/usagi-index-wrapper.git
+cd usagi-index-wrapper
+python3 -m venv .venv
+source .venv/bin/activate
+pip install fastapi "uvicorn[standard]" pydantic pydantic-settings
 
-# 2. (One-time) Upgrade the Lucene 4.9 index to Lucene 8.x format
-#    so PyLucene 9.x can open it.  Downloads ~120 MB of JARs on first run.
-python scripts/upgrade_lucene_index.py --index-dir /data/usagi/mainIndex
+# 2. Build the search index (one-time, ~10 min on NVMe SSD)
+python scripts/build_native_index.py \
+  --concept-csv   /path/to/athena/CONCEPT.csv \
+  --synonym-csv   /path/to/athena/CONCEPT_SYNONYM.csv \
+  --ancestor-csv  /path/to/athena/CONCEPT_ANCESTOR.csv \
+  --db-path       /data/search.db
 
-# 3. (One-time) Build the SQLite concept-name cache from Athena CONCEPT.csv
-python scripts/build_concept_cache.py \
-    --concept-csv /data/athena/CONCEPT.csv \
-    --db-path     /data/usagi/concepts.db
+# 3. Start the service
+USAGI_CONCEPT_DB_PATH=/data/search.db \
+  uvicorn usagi_search.api:app --host 0.0.0.0 --port 8000
 
-# 4. Start the service
-USAGI_USAGI_DIR=/data/usagi \
-USAGI_CONCEPT_DB_PATH=/data/usagi/concepts.db \
-uvicorn usagi_search.api:app --host 0.0.0.0 --port 8000
-
-# 5. Run smoke tests (in a second terminal)
-python test_service.py
+# 4. Test
+python test_service.py --term "cholecystectomy" --standard-only --top-n 5
 ```
 
-The service auto-builds the concept cache on startup if `USAGI_CONCEPT_CSV` is set
-and the cache file does not yet exist:
+---
+
+## Docker / Podman
 
 ```bash
-USAGI_USAGI_DIR=/data/usagi \
-USAGI_CONCEPT_CSV=/data/athena/CONCEPT.csv \
-uvicorn usagi_search.api:app --port 8000
+docker build -t usagi-search .
+
+docker run -d -p 8000:8000 \
+  -v /data/search.db:/data/search.db:ro \
+  usagi-search:latest
 ```
+
+Works with `podman` as a drop-in replacement. OCI-compliant for Singularity/Apptainer.
 
 ---
 
@@ -57,19 +60,11 @@ uvicorn usagi_search.api:app --port 8000
 
 | Variable | Default | Description |
 |---|---|---|
-| `USAGI_USAGI_DIR` | *(required)* | Root folder containing `mainIndex/` |
-| `USAGI_CONCEPT_CSV` | `""` | Path to Athena `CONCEPT.csv`; triggers cache build if DB absent |
-| `USAGI_CONCEPT_DB_PATH` | `<usagi_dir>/concepts.db` | SQLite cache path |
-| `USAGI_USE_DERIVED_INDEX` | `false` | Use `derivedIndex/` when present (see note below) |
+| `USAGI_CONCEPT_DB_PATH` | `/data/search.db` | Path to the SQLite search + concept DB |
+| `USAGI_USAGI_DIR` | `/data` | Used by PyLucene backend only |
+| `USAGI_USE_DERIVED_INDEX` | `false` | PyLucene backend only |
 | `USAGI_DEFAULT_TOP_N` | `10` | Default result count |
-
-### derivedIndex vs mainIndex
-
-Usagi's *derived* index is a copy of `mainIndex` that additionally contains the
-source-code names from the mapping file currently loaded in the GUI.  This shifts
-the IDF weights so that tokens common in *your* source terminology are weighted lower.
-For a general-purpose API without a specific source file, use `mainIndex`
-(`USAGI_USE_DERIVED_INDEX=false`, the default).
+| `USAGI_ENGINE` | *(unset)* | Set to `pylucene` to use the PyLucene backend |
 
 ---
 
@@ -80,24 +75,24 @@ For a general-purpose API without a specific source file, use `mainIndex`
 ```json
 {
   "status": "ok",
-  "index_path": "/data/usagi/mainIndex",
-  "index_docs": 8432105,
+  "index_path": "/data/search.db",
+  "index_docs": 4809623,
   "concept_db_available": true,
-  "concept_db_path": "/data/usagi/concepts.db"
+  "concept_db_path": "/data/search.db"
 }
 ```
 
 ### `POST /search`
 
-Request body:
+Request:
 
 ```json
 {
-  "term": "myocardial infarction",
+  "term": "cholecystectomy",
   "top_n": 5,
   "standard_only": true,
-  "domain_filter": ["Condition"],
-  "vocabulary_filter": ["SNOMED"],
+  "domain_filter": ["Procedure"],
+  "vocabulary_filter": null,
   "concept_class_filter": null,
   "include_source_concepts": false,
   "use_mlt": true
@@ -108,104 +103,83 @@ Response:
 
 ```json
 {
-  "term": "myocardial infarction",
-  "total_candidates": 24,
+  "term": "cholecystectomy",
+  "total_candidates": 5,
   "results": [
     {
-      "concept_id": 4329847,
-      "concept_name": "Myocardial infarction",
+      "concept_id": 4242997,
+      "concept_name": "Cholecystectomy",
       "vocabulary_id": "SNOMED",
-      "domain_id": "Condition",
-      "concept_class_id": "Clinical Finding",
+      "domain_id": "Procedure",
+      "concept_class_id": "Procedure",
       "standard_concept": "S",
-      "match_term": "Myocardial infarction",
-      "similarity_score": 0.9982
-    },
-    ...
+      "match_term": "Cholecystectomy",
+      "similarity_score": 1.0,
+      "parent_count": 2,
+      "child_count": 10,
+      "parents": [
+        {"concept_id": 4001377, "concept_name": "Biliary tract excision"},
+        {"concept_id": 4059308, "concept_name": "Operation on gallbladder"}
+      ],
+      "breadcrumb": "Procedure > Procedure by method > Removal > Surgical removal > Excision > Trunk excision > Abdomen excision > Biliary tract excision > Cholecystectomy"
+    }
   ]
 }
 ```
 
-Interactive docs at **`/docs`** (Swagger UI) and **`/redoc`** after the service starts.
+`match_term` is the indexed synonym that drove the match — may differ from `concept_name`.
+`breadcrumb` is the ancestor path from vocabulary root to the concept.
+
+Interactive docs at **`/docs`** after the service starts.
 
 ---
 
-## Installing PyLucene
+## Test script
 
-PyLucene is not on PyPI.  Three options, easiest first:
+`test_service.py` renders results as an indented ancestry tree:
 
-### Option A — conda-forge (pre-built wheel, recommended)
+```
+4242997  Cholecystectomy  [SNOMED, Procedure]  score=1.000
+  ← Biliary tract excision
+    ← Abdomen excision
+      ← Excision
+        ← Removal
+          ← Procedure
+```
+
+```bash
+python test_service.py --term "Whipple Procedure" --standard-only --top-n 5
+python test_service.py --term "HbA1c" --domain Measurement --top-n 3
+```
+
+---
+
+## Hardware requirements
+
+The search DB is ~6 GB. For acceptable query latency the host should have **≥ 8 GB RAM** so the OS page cache can hold the hot portions of the index. Typical query time is under 300 ms with domain filtering on a machine with sufficient RAM.
+
+---
+
+## PyLucene backend (optional)
+
+If you have an existing Usagi Lucene index on disk and prefer to read it directly, set `USAGI_ENGINE=pylucene`. This requires Java 11+ and PyLucene (not on PyPI — install via conda-forge or build from source):
 
 ```bash
 conda install -c conda-forge pylucene
 ```
 
-### Option B — Docker (zero local setup)
-
-```dockerfile
-FROM coady/pylucene:latest
-WORKDIR /app
-COPY . .
-RUN pip install fastapi uvicorn pydantic pydantic-settings httpx
-CMD ["uvicorn", "usagi_search.api:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Option C — Build from source
+Usagi's index is written with Lucene 4.9; PyLucene 9.x cannot read it directly. Upgrade it first:
 
 ```bash
-# Requires: Java 11+, Ant ≥ 1.10, Python 3.10+, gcc/clang
-
-wget https://dlcdn.apache.org/lucene/pylucene/pylucene-9.10.0-src.tar.gz
-tar xf pylucene-9.10.0-src.tar.gz
-cd pylucene-9.10.0/jcc
-python setup.py build && python setup.py install
-cd ..
-# Edit Makefile: set PREFIX_PYTHON, PYTHON, JCC, NUM_FILES
-make && make install
-```
-
-Full instructions: https://lucene.apache.org/pylucene/install.html
-
----
-
-## Upgrading the Lucene index
-
-Usagi writes its index with **Lucene 4.9**.  PyLucene 9.x cannot open it directly —
-the format must be upgraded through intermediate Lucene versions.
-`scripts/upgrade_lucene_index.py` automates this:
-
-```
-4.9 ──(lucene-core-5.5.5)──▶ 5.x
-5.x ──(lucene-core-6.6.6)──▶ 6.x
-6.x ──(lucene-core-7.7.3)──▶ 7.x
-7.x ──(lucene-core-8.11.3)─▶ 8.x  ← PyLucene 9.x reads this
-```
-
-The script downloads JARs from Maven Central on first run (~120 MB total, cached in
-`scripts/lib/`).  The index is upgraded **in place** — make a backup of
-`mainIndex/` and `derivedIndex/` beforehand if needed.
-
-```bash
-python scripts/upgrade_lucene_index.py --index-dir /data/usagi/mainIndex
-python scripts/upgrade_lucene_index.py --index-dir /data/usagi/derivedIndex  # if present
+python scripts/upgrade_lucene_index.py --index-dir /path/to/mainIndex
 ```
 
 ---
-
-## Fidelity gaps vs the Java original
-
-| Area | Gap | Practical impact |
-|---|---|---|
-| **NGramTokenizer version** | Usagi uses Lucene 4.9's `NGramTokenizer`; PyLucene 9.x ships Lucene 9.x's. Both emit all substrings of length 2–3. The only documented behavioural difference is Unicode code-point handling for surrogate pairs — irrelevant for OMOP vocabulary terms. | Negligible |
-| **StandardFilter** | Removed in Lucene 9.x (was a no-op on ASCII in 7.x). Not applied in Python. | None |
-| **derivedIndex IDF calibration** | The derived index includes the user's source-code names so IDF weights are calibrated for the specific mapping job. Without a source file we use `mainIndex`, shifting IDF slightly. | Minor — common vocabulary terms score marginally differently; rare terms unaffected |
-| **Berkeley DB** | Python's `bsddb3` wraps C libdb and cannot read Berkeley DB JE (Java Edition) files. We substitute Athena `CONCEPT.csv` as the concept-metadata source. The data is identical — Usagi's `BerkeleyDbBuilder.java` populates its BDB from the same CSV. | None |
-| **`filterConceptIds`** | Usagi's GUI passes a set of pre-selected concept IDs when the user is refining a mapping. This is not exposed by the REST API (add to `SearchRequest` if needed). | Feature gap, not a correctness issue |
-| **Score normalisation** | Scores are TF-IDF cosine in [0, 1]. Lucene native BM25 scores (used as fallback when the query contains BoostQuery clauses) are not normalised. The fallback path is uncommon. | Rare edge case |
 
 ## Setup on Debian/Ubuntu VMs
 
 ```bash
+sudo apt install python3.12-venv -y
 python3 -m venv .venv
 source .venv/bin/activate
 pip install fastapi "uvicorn[standard]" pydantic pydantic-settings
