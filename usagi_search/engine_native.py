@@ -138,24 +138,34 @@ class NativeSearchEngine:
         if not self._conn:
             return []
 
-        # Use trigrams only for candidate retrieval — bigrams are too common
-        # on small-RAM hosts (each bigram posting list can be millions of rows).
-        # The index contains both bigrams and trigrams, so trigram-only queries
-        # still hit the same index; they just prune the candidate set far more
-        # aggressively.  Full bigram+trigram IDF vectors are still used for
-        # scoring after candidates are retrieved.
-        query_grams = ngrams(search_term, min_n=3, max_n=3)
-        if not query_grams:
+        # Full bigram+trigram set used for scoring (faithful to Usagi).
+        all_grams = ngrams(search_term)
+        if not all_grams:
             return []
 
-        # --- IDF weights for query n-grams ------------------------------
-        query_vec = self._idf_vector(query_grams)
+        # --- IDF weights (full set, for scoring) ------------------------
+        query_vec = self._idf_vector(all_grams)
         if not query_vec:
             return []
 
+        # --- narrow candidate retrieval to the K most distinctive grams -
+        # Each common trigram like "bre", "can", "nce" maps to hundreds of
+        # thousands of rows on a 2.6M-doc vocabulary, overwhelming a low-RAM
+        # VM.  We use only the TOP_K highest-IDF trigrams for the JOIN so the
+        # intermediate result set stays small, then score with the full vector.
+        TOP_K = 5
+        trigrams = ngrams(search_term, min_n=3, max_n=3)
+        if not trigrams:
+            trigrams = ngrams(search_term, min_n=2, max_n=2)  # fallback for ≤2-char terms
+
+        sorted_by_idf = sorted(
+            trigrams, key=lambda g: query_vec.get(g, 0), reverse=True
+        )
+        selective_grams = sorted_by_idf[:TOP_K] if sorted_by_idf else list(all_grams)
+
         # --- candidate retrieval: single JOIN avoids large IN (doc_ids) -
-        grams_ph = ",".join("?" * len(query_grams))
-        params: List[Any] = list(query_grams)
+        grams_ph = ",".join("?" * len(selective_grams))
+        params: List[Any] = list(selective_grams)
 
         where_clauses = [f"nd.ngram IN ({grams_ph})"]
         if not include_source_concepts:
