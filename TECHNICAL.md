@@ -14,24 +14,27 @@ In practice, Usagi requires a clinician or analyst to:
 - Runs as a container with no Java dependency
 - Builds its index in ~10 minutes from standard Athena vocabulary files
 - Exposes concept matching over HTTP for programmatic use
+- Optionally validates mapping accuracy using Claude (`claude-opus-4-8`)
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    FastAPI service                        │
-│                                                          │
-│  POST /search ──► NativeSearchEngine ──► SQLite DB       │
-│  GET  /health                           (search.db)      │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                         FastAPI service                           │
+│                                                                   │
+│  POST /search   ──► NativeSearchEngine ──► SQLite DB             │
+│  POST /validate ──► ConceptValidator   ──► Anthropic API         │
+│  GET  /health                              (claude-opus-4-8)     │
+└──────────────────────────────────────────────────────────────────┘
          ▲
          │ built once from
 ┌─────────────────────────┐
 │  Athena vocabulary CSVs  │
 │  CONCEPT.csv             │
 │  CONCEPT_SYNONYM.csv     │
+│  CONCEPT_ANCESTOR.csv    │
 └─────────────────────────┘
 ```
 
@@ -43,6 +46,8 @@ Two search engine backends are provided:
 | **PyLucene** | `engine.py` | Java + PyLucene | Reading an existing Usagi Lucene index |
 
 The native backend is the primary path. It replicates Usagi's search behavior in pure Python using SQLite as the backing store.
+
+The `/validate` endpoint is optional and requires `ANTHROPIC_API_KEY`. When available, it provides a two-step workflow: n-gram search finds candidates in ~200 ms, then Claude validates clinical accuracy in 15–30 s.
 
 ---
 
@@ -350,6 +355,65 @@ CREATE INDEX idx_hierarchy_parent ON concept_hierarchy(parent_concept_id);
 | `parents` | Immediate parent concepts (up to 10) with concept_id and concept_name |
 | `breadcrumb` | Ancestor path from vocabulary root to this concept, `' > '`-separated, walking one representative parent chain (OMOP is a DAG) |
 
+### `POST /validate`
+
+Validates mapping candidates using `claude-opus-4-8` with adaptive thinking. Requires `ANTHROPIC_API_KEY` on the server; returns HTTP 503 if not configured.
+
+**Request:**
+
+```json
+{
+  "term": "axillary lymph node dissection",
+  "candidates": [ ...ConceptResult objects from /search... ],
+  "top_n": 3
+}
+```
+
+`candidates` is the full `/search` response array. `top_n` (1–10, default 3) controls how many are sent to Claude.
+
+**Response:**
+
+```json
+{
+  "term": "axillary lymph node dissection",
+  "top_verdict": "mismatch",
+  "confidence": "medium",
+  "clinical_reasoning": "Axillary lymph node dissection (ALND) is an en-bloc therapeutic removal of the axillary nodal basin (typically levels I–II). The top candidate 'Excision of axillary lymph node' denotes removal of a single node and sits in the shoulder-excision branch of the hierarchy. Although Usagi matched it via a SNOMED synonym labeled 'Axillary lymph node dissection,' the concept's preferred name reflects a far narrower scope...",
+  "recommended_concept_name": "Complete axillary lymphadenectomy",
+  "recommended_concept_notes": "Represents block/en-bloc dissection of the axillary lymph node group, matching the scope and intent of ALND.",
+  "candidate_verdicts": [
+    {
+      "concept_id": 4120961,
+      "concept_name": "Excision of axillary lymph node",
+      "verdict": "mismatch",
+      "notes": "Denotes excision of a single node; understates procedure scope and morbidity despite the matched synonym."
+    },
+    {
+      "concept_id": 4194967,
+      "concept_name": "Complete axillary lymphadenectomy",
+      "verdict": "ambiguous",
+      "notes": "Best representation of en-bloc dissection; minor caveat is 'complete' may imply all levels whereas standard ALND is levels I–II."
+    }
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `top_verdict` | `"correct"` / `"mismatch"` / `"ambiguous"` — verdict on the top-ranked candidate |
+| `confidence` | `"high"` / `"medium"` / `"low"` |
+| `clinical_reasoning` | Claude's clinical explanation of the key distinction and downstream implications |
+| `recommended_concept_name` | Better OMOP concept name if verdict is mismatch or ambiguous; `null` if correct |
+| `recommended_concept_notes` | Why the recommendation is more appropriate; `null` if correct |
+| `candidate_verdicts` | Per-candidate verdicts with concept_id, concept_name, verdict, and notes |
+
+**Implementation notes:**
+
+- The clinical system prompt is marked `cache_control: ephemeral`. After the first call the ~4 K-token prompt is cached; subsequent calls pay ~0.1× on those tokens.
+- Adaptive thinking (`thinking: {type: "adaptive"}`) is enabled so Claude reasons through clinical distinctions before producing the structured verdict.
+- Response is constrained to a JSON schema with `additionalProperties: false` throughout, ensuring the output is always machine-parseable.
+- Latency: 15–30 s per call (thinking + generation). Not suitable for real-time UX; intended for batch mapping review workflows.
+
 ---
 
 ## R Client
@@ -369,9 +433,11 @@ pak::pkg_install("advocate-phenotype-dev/usagi-r-client")
 | Function | Description |
 |---|---|
 | `usagi_connect(base_url, timeout)` | Create a connection object pointing at the service |
-| `usagi_health(client)` | Check service status; returns a named list |
+| `usagi_health(client)` | Check service health |
 | `usagi_search(client, term, ...)` | Search a single term; returns a `data.frame` |
 | `usagi_search_batch(client, terms, ...)` | Search multiple terms; returns a combined `data.frame` with a `source_term` column |
+| `usagi_print(df, max_ancestors)` | Render results as an indented `←` ancestry tree |
+| `usagi_validate(client, term, df, top_n)` | Validate top candidates via Claude; returns a named list with verdict, reasoning, and per-candidate verdicts |
 
 ### Example
 
@@ -397,6 +463,21 @@ batch <- usagi_search_batch(
   standard_only = TRUE,
   top_n         = 2
 )
+
+# Validate top candidates via Claude (requires ANTHROPIC_API_KEY on server)
+df <- usagi_search(client, "axillary lymph node dissection",
+                   domain_filter = "Procedure", standard_only = TRUE, top_n = 5)
+v <- usagi_validate(client, "axillary lymph node dissection", df, top_n = 3)
+
+cat(v$top_verdict)         # "mismatch"
+cat(v$confidence)          # "medium"
+cat(v$clinical_reasoning)  # detailed clinical explanation
+cat(v$recommended_concept_name)  # "Complete axillary lymphadenectomy"
+print(v$candidate_verdicts)
+#>   concept_id                      concept_name   verdict
+#> 1    4120961   Excision of axillary lymph node  mismatch
+#> 2    4194967 Complete axillary lymphadenectomy ambiguous
+#> 3    4201533     Axillary lymph node procedure  mismatch
 ```
 
 ### Return value
