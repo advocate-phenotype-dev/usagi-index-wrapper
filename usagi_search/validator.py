@@ -80,12 +80,12 @@ _OUTPUT_SCHEMA = {
             "description": "Clinical explanation of the key distinction and why it matters",
         },
         "recommended_concept_name": {
-            "type": "string",
-            "description": "If verdict is mismatch or ambiguous: name of a better OMOP concept",
+            "type": ["string", "null"],
+            "description": "If verdict is mismatch or ambiguous: name of a better OMOP concept. null otherwise.",
         },
         "recommended_concept_notes": {
-            "type": "string",
-            "description": "Why the recommended concept is more appropriate",
+            "type": ["string", "null"],
+            "description": "Why the recommended concept is more appropriate. null otherwise.",
         },
         "candidate_verdicts": {
             "type": "array",
@@ -103,7 +103,11 @@ _OUTPUT_SCHEMA = {
             },
         },
     },
-    "required": ["top_verdict", "confidence", "clinical_reasoning", "candidate_verdicts"],
+    "required": [
+        "top_verdict", "confidence", "clinical_reasoning",
+        "recommended_concept_name", "recommended_concept_notes",
+        "candidate_verdicts",
+    ],
     "additionalProperties": False,
 }
 

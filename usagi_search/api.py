@@ -225,11 +225,15 @@ def validate(req: ValidateRequest):
     # Convert ConceptResult objects to plain dicts for the validator
     candidates = [c.model_dump() for c in req.candidates]
 
-    result = _validator.validate(
-        term=req.term,
-        candidates=candidates,
-        top_n=req.top_n,
-    )
+    try:
+        result = _validator.validate(
+            term=req.term,
+            candidates=candidates,
+            top_n=req.top_n,
+        )
+    except Exception as exc:
+        logger.exception("Validator error for term %r", req.term)
+        raise HTTPException(500, f"Validation error: {exc}") from exc
 
     return ValidateResponse(
         term=req.term,
