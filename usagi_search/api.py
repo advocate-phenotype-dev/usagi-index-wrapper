@@ -8,7 +8,7 @@ Engine selection (in priority order):
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 
@@ -19,12 +19,17 @@ from .models import (
     HealthResponse,
     SearchRequest,
     SearchResponse,
+    ValidateRequest,
+    ValidateResponse,
+    CandidateVerdictResponse,
 )
+from .validator import ConceptValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
 
 _engine = None
-_store: ConceptStore = None  # type: ignore[assignment]
+_store: ConceptStore = None   # type: ignore[assignment]
+_validator: Optional[ConceptValidator] = None
 _engine_type: str = "none"
 
 
@@ -74,7 +79,7 @@ def _load_engine(settings):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _engine, _store
+    global _engine, _store, _validator
     settings = get_settings()
 
     _engine = _load_engine(settings)
@@ -89,6 +94,16 @@ async def lifespan(app: FastAPI):
         logger.info(
             "No concept metadata cache found; concept_name will fall back to match_term."
         )
+
+    # Validator is optional — only available when ANTHROPIC_API_KEY is set
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            _validator = ConceptValidator()
+            logger.info("Clinical validator: ready (claude-opus-4-8)")
+        except Exception as exc:
+            logger.warning("Clinical validator unavailable: %s", exc)
+    else:
+        logger.info("Clinical validator: disabled (set ANTHROPIC_API_KEY to enable)")
 
     yield
 
@@ -186,3 +201,45 @@ def _reorder_ties(results: List[ConceptResult]) -> List[ConceptResult]:
         exact = r.match_term.lower() == r.concept_name.lower()
         return (-r.similarity_score, 0 if exact else 1)
     return sorted(results, key=key)
+
+
+@app.post("/validate", response_model=ValidateResponse, tags=["search"])
+def validate(req: ValidateRequest):
+    """
+    Validate concept mapping candidates using Claude (claude-opus-4-8).
+
+    Sends the source term and top candidates to Claude with adaptive thinking
+    enabled. Claude evaluates clinical accuracy and returns a structured
+    verdict: correct / mismatch / ambiguous.
+
+    Requires ANTHROPIC_API_KEY to be set on the server.
+    The system prompt is cached after the first call (~90% cheaper thereafter).
+    """
+    if _validator is None:
+        raise HTTPException(
+            503,
+            "Clinical validator is not available. "
+            "Set ANTHROPIC_API_KEY on the server and restart.",
+        )
+
+    # Convert ConceptResult objects to plain dicts for the validator
+    candidates = [c.model_dump() for c in req.candidates]
+
+    result = _validator.validate(
+        term=req.term,
+        candidates=candidates,
+        top_n=req.top_n,
+    )
+
+    return ValidateResponse(
+        term=req.term,
+        top_verdict=result.top_verdict,
+        confidence=result.confidence,
+        clinical_reasoning=result.clinical_reasoning,
+        recommended_concept_name=result.recommended_concept_name,
+        recommended_concept_notes=result.recommended_concept_notes,
+        candidate_verdicts=[
+            CandidateVerdictResponse(**v.model_dump())
+            for v in result.candidate_verdicts
+        ],
+    )

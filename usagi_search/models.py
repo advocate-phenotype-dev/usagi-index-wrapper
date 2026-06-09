@@ -1,5 +1,5 @@
 """Pydantic models for API request/response."""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -72,3 +72,32 @@ class HealthResponse(BaseModel):
     index_docs: int
     concept_db_available: bool
     concept_db_path: str
+
+
+# ---------------------------------------------------------------------------
+# Validation models
+# ---------------------------------------------------------------------------
+
+class ValidateRequest(BaseModel):
+    term: str = Field(..., description="Source term that was searched")
+    candidates: List[ConceptResult] = Field(
+        ..., description="Candidates from /search to validate"
+    )
+    top_n: int = Field(3, ge=1, le=10, description="How many top candidates to validate")
+
+
+class CandidateVerdictResponse(BaseModel):
+    concept_id: int
+    concept_name: str
+    verdict: str = Field(..., description="'correct' | 'mismatch' | 'ambiguous'")
+    notes: str
+
+
+class ValidateResponse(BaseModel):
+    term: str
+    top_verdict: str = Field(..., description="Verdict on the top-ranked candidate")
+    confidence: str = Field(..., description="'high' | 'medium' | 'low'")
+    clinical_reasoning: str
+    recommended_concept_name: Optional[str] = None
+    recommended_concept_notes: Optional[str] = None
+    candidate_verdicts: List[CandidateVerdictResponse]

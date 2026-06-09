@@ -3,6 +3,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
+anthropic>=0.40.0          # clinical validation via /validate endpoint (optional)
 
 # ── PyLucene ───────────────────────────────────────────────────────────────
 # PyLucene is NOT on PyPI.  It must be compiled against your JDK.
